@@ -66,6 +66,12 @@ def fetch_process_events(
     Returns:
         (events, source, error) where source is 'sysmon', 'security', or 'none'.
     """
+    # `hours` is interpolated into the PowerShell script below, so make sure
+    # it is a plain integer whatever the caller passed.
+    hours = int(hours)
+    if hours <= 0:
+        raise ValueError("hours must be positive")
+
     events: List[ProcEvent] = []
     source = "none"
     err: Optional[str] = None
