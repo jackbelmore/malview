@@ -2,6 +2,8 @@
 """Textual TUI for PE malware analysis."""
 
 from pathlib import Path
+
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import (
     Header,
@@ -11,10 +13,10 @@ from textual.widgets import (
     TabPane,
     DataTable,
     DirectoryTree,
-    Label,
 )
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
+from textual.markup import escape
 from textual.reactive import reactive
 
 from malview import PEEngine, ScanResult, MalviewError
@@ -37,7 +39,11 @@ class OverviewPanel(ScrollableContainer):
 
         # Format overview text
         lines = []
-        lines.append(f"[bold cyan]FILE:[/bold cyan] {result.file_path}")
+        # Everything that comes from the sample (its file name, section,
+        # DLL and function names) is escaped before it goes into markup: a
+        # crafted name such as "[/bold]" would otherwise crash the app with a
+        # MarkupError, and "[@click=...]" would become a clickable action.
+        lines.append(f"[bold cyan]FILE:[/bold cyan] {escape(result.file_path)}")
         lines.append("")
 
         # Metadata
@@ -98,7 +104,7 @@ class SectionsPanel(Container):
             suspicious = "⚠ YES" if section.is_suspicious() else ""
 
             table.add_row(
-                section.name,
+                Text(section.name),  # Text, not str: str cells are parsed as markup
                 f"0x{section.virtual_address:08x}",
                 f"0x{section.virtual_size:08x}",
                 f"0x{section.raw_size:08x}",
@@ -126,11 +132,11 @@ class ImportsPanel(ScrollableContainer):
 
         for imp in result.imports:
             marker = "[red]⚠[/red]" if imp.is_suspicious() else " "
-            lines.append(f"{marker} [bold]{imp.dll_name}[/bold] ({len(imp.functions)} functions)")
+            lines.append(f"{marker} [bold]{escape(imp.dll_name)}[/bold] ({len(imp.functions)} functions)")
 
             # Show first 10 functions
             for func in imp.functions[:10]:
-                lines.append(f"    - {func}")
+                lines.append(f"    - {escape(func)}")
 
             if len(imp.functions) > 10:
                 lines.append(f"    [dim]... and {len(imp.functions) - 10} more[/dim]")
@@ -185,25 +191,23 @@ class MalwareAnalysisTUI(App):
     TITLE = "Malware Analysis TUI"
     SUB_TITLE = "PE File Static Analysis"
 
-    def __init__(self, start_path: str = "/mnt/c/Windows/System32"):
+    def __init__(self, start_path: str = "."):
         super().__init__()
         self.start_path = start_path
         self.engine = PEEngine()
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Horizontal(
-            DirectoryTree(self.start_path, id="file-tree"),
-            Vertical(
-                TabbedContent(
-                    TabPane("Overview", OverviewPanel()),
-                    TabPane("Sections", SectionsPanel()),
-                    TabPane("Imports", ImportsPanel()),
-                    id="tabs",
-                ),
-                id="main-panel",
-            ),
-        )
+        with Horizontal():
+            yield DirectoryTree(self.start_path, id="file-tree")
+            with Vertical(id="main-panel"):
+                with TabbedContent(id="tabs"):
+                    with TabPane("Overview"):
+                        yield OverviewPanel()
+                    with TabPane("Sections"):
+                        yield SectionsPanel()
+                    with TabPane("Imports"):
+                        yield ImportsPanel()
         yield Footer()
 
     def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
@@ -212,14 +216,14 @@ class MalwareAnalysisTUI(App):
 
         # Only analyze PE files
         if not file_path.lower().endswith(('.exe', '.dll', '.sys')):
-            self.notify(f"Not a PE file: {Path(file_path).name}", severity="warning")
+            self.notify(f"Not a PE file: {Path(file_path).name}", severity="warning", markup=False)
             return
 
         self.analyze_file(file_path)
 
     def analyze_file(self, file_path: str) -> None:
         """Analyze a PE file and update panels."""
-        self.notify(f"Analyzing: {Path(file_path).name}...")
+        self.notify(f"Analyzing: {Path(file_path).name}...", markup=False)
 
         try:
             result = self.engine.analyze(file_path)
@@ -235,12 +239,12 @@ class MalwareAnalysisTUI(App):
 
             # Show success notification
             status = "⚠ SUSPICIOUS" if result.has_suspicious_indicators() else "✓ Clean"
-            self.notify(f"{status}: {Path(file_path).name}", severity="information")
+            self.notify(f"{status}: {Path(file_path).name}", severity="information", markup=False)
 
         except MalviewError as e:
-            self.notify(f"Error: {e}", severity="error")
+            self.notify(f"Error: {e}", severity="error", markup=False)
         except Exception as e:
-            self.notify(f"Unexpected error: {e}", severity="error")
+            self.notify(f"Unexpected error: {e}", severity="error", markup=False)
 
     def action_refresh_tree(self) -> None:
         """Refresh the file tree."""
@@ -252,8 +256,8 @@ class MalwareAnalysisTUI(App):
 if __name__ == "__main__":
     import sys
 
-    # Allow custom start path
-    start_path = sys.argv[1] if len(sys.argv) > 1 else "/mnt/c/Windows/System32"
+    # Allow custom start path (default: current directory)
+    start_path = sys.argv[1] if len(sys.argv) > 1 else "."
 
     app = MalwareAnalysisTUI(start_path=start_path)
     app.run()
