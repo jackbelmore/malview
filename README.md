@@ -1,184 +1,205 @@
-# Malware Analysis TUI
+# malview
 
-A Text User Interface (TUI) for static analysis of Windows PE files, built with [Textual](https://textual.textualize.io/).
+Static triage for Windows PE files: a CLI and a terminal UI that combine
+pefile, YARA, and Mandiant's capa and FLOSS into one report, with a heuristic
+risk score that tells you where to look first.
 
-## Features
+It was built to speed up the first pass on a suspicious executable: hashes,
+headers, sections, imports, rule matches and decoded strings in one place,
+without running the sample.
 
-- **Fast Data Analysis** (synchronous via pefile):
-  - File hashes (MD5, SHA1, SHA256)
-  - PE metadata (architecture, compile time, entry point)
-  - Section analysis with entropy calculation
-  - Import table parsing with suspicious API detection
+<!-- TODO(user): add a screenshot of the TUI, e.g. docs/tui.png -->
 
-- **Slow Data Analysis** (asynchronous via external tools):
-  - Capability detection (capa - FLARE capability detector)
-  - Obfuscated string extraction (floss - FLARE obfuscated string solver)
+## What it reports
 
-- **Interactive TUI**:
-  - File browser sidebar
-  - Tabbed interface (Overview, Sections, Imports)
-  - Real-time analysis
+**Fast pass** (pure Python, under a second for typical files):
 
-## Installation
+- MD5 / SHA-1 / SHA-256, architecture, DLL/EXE, entry point, compile time (UTC)
+- Sections with Shannon entropy and R/W/X flags; W+X sections and
+  high-entropy executable sections are flagged
+- Import table, flagging APIs commonly used for injection, loading,
+  persistence, networking and anti-debugging (including their `A`/`W` variants)
+- Anomalies: implausible timestamps, packing indicators, suspicious imports
+- **YARA** matches against [Yara-Rules](https://github.com/Yara-Rules/rules),
+  grouped by category
+- A 0–100 **risk score** (LOW / MEDIUM / HIGH / CRITICAL)
 
-### Windows (PowerShell)
+**Slow pass** (`--async`, optional tools):
 
-```powershell
-# Clone
-git clone https://github.com/jackbelmore/Sloth-Static-Analysis.git
-cd Sloth-Static-Analysis
+- **capa** capabilities (anti-analysis, injection, persistence, network, ...),
+  with a file-scope fallback if full analysis times out
+- **FLOSS** decoded and stack strings
 
-# Create venv
-py -3 -m venv venv-win
+**Optional enrichment:**
 
-# Activate
-.\venv-win\Scripts\activate
+- `--vt`: VirusTotal detections for the file's hash (hash lookup only, nothing
+  is uploaded)
+- `--proc-events` (Windows): recent process-creation events whose parent is the
+  analysed binary, from Sysmon or the Security log. `sysmon-minimal.xml` is a
+  minimal Sysmon config that logs process creation.
 
-# Upgrade tooling (recommended)
-python -m pip install --upgrade pip setuptools wheel
+## Example
 
-# Install core deps (binary wheels only; avoids needing build tools)
-pip install --only-binary=:all: -r requirements.txt
+From a synthetic PE built by the test suite: one high-entropy W+X section
+named `UPX1` and injection-style imports.
 
-# Optional async tools
-# flare-capa/flare-floss may need Microsoft Visual C++ Build Tools if wheels are unavailable.
-# Install Build Tools (VS 2022 Build Tools with "Desktop development with C++"):
-#   winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --quiet --norestart"
-# Then install:
-pip install flare-capa flare-floss
+```text
+🚨 RISK ASSESSMENT
+--------------------------------------------------------------------------------
+  Overall Risk: CRITICAL (Score: 100/100)
+  File shows severe malicious indicators - high confidence malware
+
+  3 Suspicious Indicators Found:
+    🔒 Section 'UPX1' has very high entropy (7.98) - possible packing/encryption
+    🚨 Section 'UPX1' is both writable and executable (W+X)
+    🔧 KERNEL32.dll imports suspicious APIs: VirtualAlloc, LoadLibraryA, GetProcAddress
+
+🎯 YARA DETECTIONS
+--------------------------------------------------------------------------------
+  10 YARA rule(s) matched:
+    📦 [malware/MALW_PE_sections] suspicious_packer_section
+        The packer/protector section names/keywords
+    📦 [packers/packer] PENinja
+    ℹ️ [packers/packer_compiler_signatures] IsPE32
+    ...
 ```
 
-### Linux (bash)
+## Install
+
+Python 3.11+.
 
 ```bash
-# Clone
-git clone https://github.com/jackbelmore/Sloth-Static-Analysis.git
-cd Sloth-Static-Analysis
-
-# Create venv
-python3 -m venv venv
-
-# Activate
-source venv/bin/activate
-
-# Install deps
+git clone https://github.com/jackbelmore/malview.git
+cd malview
+python3 -m venv venv && . venv/bin/activate     # Windows: py -3 -m venv venv; .\venv\Scripts\activate
 pip install -r requirements.txt
 
-# Optional async tools
-# May require build-essential/clang if wheels are unavailable on your distro
-pip install flare-capa flare-floss
+# YARA and capa rules (pinned commits, into the gitignored rules/ directory)
+scripts/fetch-rules.sh
+
+# Optional, for --async (large; may need a C toolchain if no wheel is available)
+pip install -r requirements-optional.txt
 ```
 
-### Uninstall / Cleanup (Windows)
+On Windows without bash, fetch the rules by hand at the commits listed in
+`scripts/fetch-rules.sh` into `rules\yara` and `rules\capa`, or point
+`MALVIEW_YARA_RULES` / `MALVIEW_CAPA_RULES` at existing copies.
 
-```powershell
-deactivate  # if venv active
-Remove-Item -Recurse -Force .\venv-win
-```
-
-### Uninstall / Cleanup (Linux)
-
-```bash
-deactivate  # if venv active
-rm -rf venv
-```
+> **Analyse samples in a disposable VM or container.** malview never executes
+> the sample, but the parsers it relies on see hostile input. See
+> [SECURITY.md](SECURITY.md).
 
 ## Usage
 
-### CLI Mode
+```bash
+python cli.py sample.exe                 # summary with risk assessment
+python cli.py sample.exe -v              # full detail: every section, import, rule
+python cli.py sample.exe --json | jq .   # machine-readable; diagnostics go to stderr
+python cli.py sample.exe --async         # add capa + FLOSS
+VT_API_KEY=... python cli.py sample.exe --vt
+
+python tui.py [directory]                # browse and analyse; q quits, r refreshes
+./run analyze 'C:\path\to\file.exe'      # WSL: Windows paths are converted
+```
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `--yara-rules DIR` / `MALVIEW_YARA_RULES` | `rules/yara/` | YARA rules directory (`--no-yara` to skip) |
+| `MALVIEW_CAPA_RULES` | `rules/capa/` | capa rules; if absent, capa uses its built-in rules |
+| `VT_API_KEY` | unset | VirusTotal API key for `--vt` |
+| `--fast-capa` | off | shorter capa/FLOSS timeouts, no fallback |
+
+Only regular files up to 256 MiB are analysed (`PEEngine(max_file_size=...)`
+to change it).
+
+## How the risk score works
+
+The score adds up weighted signals, capped at 100:
+
+| Signal | Points |
+|---|---|
+| YARA rule in the malware category | +60, and the level is at least HIGH |
+| YARA exploit / CVE rule | +40 |
+| YARA packer rule | +20 |
+| capa: injection / anti-analysis / persistence / network | +25 / +20 / +15 / +10 |
+| Each anomaly (high / medium / low) | +30 / +15 / +5 |
+| Any suspicious section; any suspicious import | +10 each |
+
+YARA matches that describe a file rather than flag it (Yara-Rules' `PECheck`
+rules such as `IsPE32`, and PEiD compiler signatures) are shown but not
+scored. Otherwise every ordinary MSVC binary would look suspicious. It's a
+triage aid: a high score means "look here first", not a verdict.
+
+## Tests
 
 ```bash
-# Fast analysis (pefile only)
-python cli.py /path/to/file.exe
-
-# Full async analysis (includes capa and floss)
-python cli.py /path/to/file.exe --async
-
-# JSON output
-python cli.py /path/to/file.exe --json
+pip install -r requirements-dev.txt
+python -m pytest        # 104 tests, no network, no samples needed
+ruff check .
 ```
 
-### TUI Mode
+The tests build minimal PE32 files in memory (`tests/pe_builder.py`) with
+chosen sections, permissions, entropy and imports, so the repository contains
+no binaries. They cover parsing, scoring, malformed and truncated input,
+FIFOs and oversized files, YARA loading, the VirusTotal client (mocked), CLI
+output, and the TUI rendering hostile file, section and DLL names headlessly.
+CI runs them on Python 3.11–3.13, along with ruff, shellcheck and a gitleaks
+scan of the full history.
 
-```bash
-# Launch TUI with default directory
-python tui.py
-
-# Launch TUI with custom start directory
-python tui.py /mnt/c/Windows/System32
-```
-
-**TUI Controls:**
-- Browse and select files from the left sidebar
-- Click files ending in `.exe`, `.dll`, or `.sys` to analyze
-- Switch between tabs to view different analysis sections
-- Press `q` to quit
-- Press `r` to refresh the file tree
-
-## Architecture
-
-This tool follows the **Hybrid Engine** pattern:
-
-- **Fast Data** (synchronous): Extracted immediately using pefile
-  - File hashes, metadata, sections, imports
-  - Displayed instantly in TUI
-
-- **Slow Data** (asynchronous): Extracted in background using external tools
-  - Capabilities (capa), strings (floss)
-  - Updates TUI progressively as data arrives
-
-## External Tools
-
-### Capa (Optional)
-
-Capa requires rule files to function. To use capa:
-
-```bash
-# Download capa rules
-wget https://github.com/mandiant/capa-rules/releases/latest/download/capa-rules.zip
-unzip capa-rules.zip -d ~/.capa-rules
-
-# Run analysis with rules
-capa -r ~/.capa-rules /path/to/file.exe
-```
-
-### Floss (Optional)
-
-Floss works out of the box but may not find strings in all files:
-- Legitimate Windows binaries often have no obfuscated strings
-- Packed malware will show decoded strings
-
-## Project Structure
+## Layout
 
 ```
-malware-analysis-tui/
-├── cli.py                      # CLI entry point
-├── tui.py                      # TUI entry point
-├── requirements.txt            # Dependencies
-├── malview/                    # Main package
-│   ├── __init__.py            # Public API
-│   ├── models.py              # Data classes
-│   ├── engine.py              # PE analysis engine
-│   ├── tools.py               # Async tool wrappers
-│   ├── exceptions.py          # Custom exceptions
-│   └── utils.py               # Utilities (entropy, hashing)
-└── ARCHITECTURE.md            # Design documentation
+cli.py                  CLI entry point
+tui.py                  Textual TUI
+malview/
+  engine.py             PE analysis (fast pass) and async orchestration
+  models.py             result types, anomaly detection, risk scoring
+  yara_scanner.py       rule loading and matching
+  tools.py              capa / FLOSS wrappers
+  vt_client.py          VirusTotal hash lookup
+  proc_events.py        Windows process-creation events via PowerShell
+  progress.py, utils.py
+scripts/fetch-rules.sh  pinned rule download
+tests/                  pytest suite and synthetic PE builder
+docs/design/            original planning documents
 ```
 
-## Development
+## Limitations and roadmap
 
-The project is built in phases:
+- The TUI shows Overview, Sections and Imports. YARA, capa and FLOSS results
+  are in the CLI only for now, and the TUI analyses on the UI thread.
+- PE only: MSI, archives and documents aren't unpacked. To analyse an MSI,
+  extract it first (`msiextract`) and point malview at the PEs inside.
+- Planned but not implemented: an HTTP security-header check and NVD CVE
+  lookup ("Sentry", see `docs/design/`).
 
-- **Phase 1**: Data engine with fast (sync) data ✓
-- **Phase 2**: TUI skeleton + async tool integration (in progress)
-- **Phase 3**: Advanced features (caching, batch analysis, reports)
+## How this was built
+
+<!-- TODO(user): confirm and edit this section. The repo's history doesn't
+record how AI tools were used for the original Dec 2025 – Jan 2026 build, so
+the first bullet needs your account of it. -->
+
+- **Original tool (Dec 2025 – Jan 2026):** TODO: describe how you built it,
+  and which AI tools (if any) helped with which parts. The specs in
+  `docs/design/` are from this period.
+- **Preparing it for publication (Oct 2026):** done with Claude Code (Claude
+  Opus 5.5). Every commit from that pass carries a `Co-Authored-By: Claude`
+  trailer. That pass:
+  - rewrote history to remove vendored third-party rules and an accidentally
+    committed Ghidra project
+  - fixed bugs found while writing tests:
+    - suspicious-API detection missed `A`/`W` variants
+    - YARA namespaces never triggered malware scoring, and index files
+      doubled matches
+    - informational rules inflated scores
+    - `--proc-events` crashed
+    - `--json` output was polluted by log lines
+    - the TUI didn't start on current Textual, and could be crashed by
+      markup in DLL or section names
+  - added input hardening, pinned rule downloads, the test suite and CI
 
 ## License
 
-MIT License
-
-## Credits
-
-- Built with [Textual](https://textual.textualize.io/)
-- Uses [pefile](https://github.com/erocarrera/pefile) for PE parsing
-- Integrates with [FLARE capa](https://github.com/mandiant/capa) and [FLARE floss](https://github.com/mandiant/flare-floss)
+MIT for malview's own code (see [LICENSE](LICENSE)). The rule sets it
+downloads keep their own licences (Yara-Rules: GPL-2.0; capa-rules:
+Apache-2.0); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

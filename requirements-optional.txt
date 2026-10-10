@@ -1,0 +1,5 @@
+# Slow-pass tools (python cli.py --async). Large installs; may need a C
+# toolchain where wheels aren't available. Keep flare-capa in step with the
+# capa-rules commit pinned in scripts/fetch-rules.sh.
+flare-capa==9.4.0
+flare-floss==3.1.1
