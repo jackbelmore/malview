@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from malview import PEEngine, MalviewError
+from malview.models import yara_match_kind
 
 
 def _category(namespace):
@@ -45,14 +46,15 @@ def format_simple(result):
         output.append("-" * 80)
         output.append(f"  {len(result.yara_matches)} YARA rule(s) matched:")
         for match in result.yara_matches[:10]:  # Show first 10
-            namespace_emoji = {
+            # Same classification the risk score uses ("info" matches are
+            # file properties such as IsPE32 and aren't scored).
+            kind_emoji = {
                 "malware": "🚨",
                 "packer": "📦",
                 "exploit": "💥",
-                "antidebug": "🛡️",
-                "crypto": "🔐"
-            }.get(_category(match.namespace), "⚠️")
-            output.append(f"    {namespace_emoji} [{match.namespace}] {match.rule_name}")
+                "info": "ℹ️",
+            }.get(yara_match_kind(match), "⚠️")
+            output.append(f"    {kind_emoji} [{match.namespace}] {match.rule_name}")
             if match.meta:
                 desc = match.meta.get("description", "")
                 if desc:
