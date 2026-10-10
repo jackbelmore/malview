@@ -10,7 +10,6 @@ dependencies by shelling out to PowerShell.
 import json
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 

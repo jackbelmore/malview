@@ -2,9 +2,15 @@
 
 import asyncio
 import json
+import os
 import shutil
+import sys
 from typing import List, Dict, Optional
 from pathlib import Path
+
+# Where scripts/fetch-rules.sh puts mandiant/capa-rules.
+DEFAULT_CAPA_RULES_DIR = Path(__file__).resolve().parent.parent / "rules" / "capa"
+CAPA_RULES_ENV_VAR = "MALVIEW_CAPA_RULES"
 
 
 class ToolNotFoundError(Exception):
@@ -19,7 +25,6 @@ class ToolExecutionError(Exception):
 
 def _resolve_tool(name: str) -> Optional[str]:
     """Resolve tool path, preferring PATH then venv sibling."""
-    import sys
     path = shutil.which(name)
     if path:
         return path
@@ -27,6 +32,26 @@ def _resolve_tool(name: str) -> Optional[str]:
     exe_dir = Path(sys.executable).parent
     candidate = exe_dir / name
     return str(candidate) if candidate.exists() else None
+
+
+def _capa_rules_dir() -> Optional[Path]:
+    """$MALVIEW_CAPA_RULES, else rules/capa/ in the repo, if it holds rules.
+
+    Returns None when no rules are available, in which case capa is run
+    without -r and uses its own default (the standalone capa binary embeds
+    its rules).
+    """
+    env = os.environ.get(CAPA_RULES_ENV_VAR)
+    candidate = Path(env) if env else DEFAULT_CAPA_RULES_DIR
+    if candidate.is_dir() and any(candidate.rglob("*.yml")):
+        return candidate
+    return None
+
+
+def _sample_arg(file_path: str) -> str:
+    """Absolute path for the sample, so a file named like an option (for
+    example "-r") can never be parsed as a flag by capa or floss."""
+    return os.path.abspath(file_path)
 
 
 async def run_capa_async(
@@ -56,24 +81,20 @@ async def run_capa_async(
     if not capa_path:
         raise ToolNotFoundError("capa not found in PATH. Install with: pip install flare-capa")
 
-    # Determine rules path (check local first, then fall back to auto)
-    rules_path = Path(__file__).parent.parent / "rules"
-    if not rules_path.exists():
-        rules_path = "auto"
-    else:
-        rules_path = str(rules_path)
+    rules_dir = _capa_rules_dir()
+    rules_args = ["-r", str(rules_dir)] if rules_dir else []
 
     async def _run_once(extra_args: List[str], wait_timeout: float) -> List[Dict]:
+        # Argument list, never a shell string: the sample path is untrusted.
         try:
             process = await asyncio.create_subprocess_exec(
                 capa_path,
                 *extra_args,
-                "-r",
-                rules_path,
+                *rules_args,
                 "-s",
-                "/dev/null",  # No signatures (use -s /dev/null to bypass)
+                os.devnull,  # No FLIRT signatures (an empty file bypasses them)
                 "--json",
-                file_path,
+                _sample_arg(file_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -116,13 +137,17 @@ async def run_capa_async(
         This avoids vivisect and only returns matches for FILE scope rules.
         """
         try:
-            from capa.rules import Rule, RuleSet, Scope
+            from capa.rules import Rule, RuleSet
             from capa.capabilities.common import find_file_capabilities
             from capa.features.extractors.pefile import PefileFeatureExtractor
         except Exception as exc:
             raise ToolExecutionError(f"capa fallback import failed: {exc}") from exc
 
-        rules_dir = Path(rules_path)
+        if rules_dir is None:
+            raise ToolExecutionError(
+                "file-scope fallback needs capa rules: run scripts/fetch-rules.sh "
+                f"or set {CAPA_RULES_ENV_VAR}"
+            )
         rule_files = list(rules_dir.rglob("*.yml")) + list(rules_dir.rglob("*.yaml"))
         file_rules = []
         for rule_file in rule_files:
@@ -138,7 +163,7 @@ async def run_capa_async(
             raise ToolExecutionError("capa fallback found no file-scope rules")
 
         ruleset = RuleSet(file_rules)
-        extractor = PefileFeatureExtractor(Path(file_path))
+        extractor = PefileFeatureExtractor(Path(_sample_arg(file_path)))
         file_caps = find_file_capabilities(ruleset, extractor, {})
 
         capabilities = []
@@ -168,7 +193,8 @@ async def run_capa_async(
 
         # Fallback to lightweight file-scope analysis via pefile extractor
         try:
-            print("Warning: capa vivisect timed out, running file-scope fallback (pefile)")
+            print("Warning: capa vivisect timed out, running file-scope fallback (pefile)",
+                  file=sys.stderr)
             return _run_file_scope_fallback()
         except Exception as fallback_err:
             raise ToolExecutionError(f"capa vivisect timed out and fallback failed: {fallback_err}") from fallback_err
@@ -202,7 +228,7 @@ async def run_floss_async(file_path: str, timeout: Optional[float] = None) -> Li
             floss_path,
             "--only", "decoded", "stack",  # Focus on decoded and stack strings
             "-j",  # JSON output (short flag)
-            file_path,
+            _sample_arg(file_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -249,6 +275,8 @@ async def run_floss_async(file_path: str, timeout: Optional[float] = None) -> Li
 
         return findings
 
+    except ToolExecutionError:
+        raise
     except json.JSONDecodeError as e:
         raise ToolExecutionError(f"Failed to parse floss output: {e}")
     except Exception as e:
@@ -263,6 +291,6 @@ def check_tools_available() -> Dict[str, bool]:
         Dictionary mapping tool names to availability (True/False)
     """
     return {
-        "capa": shutil.which("capa") is not None,
-        "floss": shutil.which("floss") is not None,
+        "capa": _resolve_tool("capa") is not None,
+        "floss": _resolve_tool("floss") is not None,
     }

@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Optional
@@ -17,18 +19,28 @@ class VTLookupResult:
     message: Optional[str] = None
 
 
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
 def fetch_vt_report(sha256: str) -> VTLookupResult:
     """
     Fetch a VirusTotal report by SHA256.
 
-    Requires environment variable VT_API_KEY.
+    Only the hash is sent: this is a GET lookup of an existing report, and
+    the sample itself is never uploaded.
+
+    Requires environment variable VT_API_KEY. The key is sent only in the
+    x-apikey request header and is never included in returned messages.
     Returns status codes so callers can surface "not found" vs. errors.
     """
+    if not _SHA256_RE.fullmatch(sha256 or ""):
+        return VTLookupResult(status="error", message="not a SHA-256 hex digest")
+
     api_key = os.getenv("VT_API_KEY")
     if not api_key:
         return VTLookupResult(status="missing_key", message="VT_API_KEY not set")
 
-    url = f"https://www.virustotal.com/api/v3/files/{sha256}"
+    url = f"https://www.virustotal.com/api/v3/files/{sha256.lower()}"
     req = urllib.request.Request(url, headers={"x-apikey": api_key})
 
     try:
