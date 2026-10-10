@@ -1,10 +1,45 @@
 """Data models for PE analysis results."""
 
 import json
-from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional
+from datetime import datetime, timezone
 from collections import defaultdict
+
+
+# APIs commonly used by malware. Names are the base Win32 names; the ANSI/Wide
+# variants (CreateProcessA, CreateProcessW, ...) are matched by
+# is_suspicious_api() below.
+SUSPICIOUS_APIS = frozenset({
+    # Memory manipulation
+    'VirtualAlloc', 'VirtualAllocEx', 'VirtualProtect', 'VirtualProtectEx',
+    # Process injection
+    'WriteProcessMemory', 'CreateRemoteThread', 'SetWindowsHookEx',
+    # Code loading
+    'LoadLibrary', 'LoadLibraryEx', 'GetProcAddress',
+    # Cryptography (sometimes obfuscation)
+    'CryptEncrypt', 'CryptDecrypt', 'CryptAcquireContext',
+    # Registry manipulation
+    'RegSetValueEx', 'RegCreateKeyEx', 'RegDeleteKey',
+    # Network
+    'InternetOpen', 'InternetConnect', 'URLDownloadToFile',
+    # Process manipulation
+    'CreateProcess', 'ShellExecute', 'WinExec',
+    # Anti-debugging
+    'IsDebuggerPresent', 'CheckRemoteDebuggerPresent',
+})
+
+
+def is_suspicious_api(name: str) -> bool:
+    """True if `name` is in SUSPICIOUS_APIS, allowing an A/W suffix.
+
+    Most of these APIs are only ever imported as their ANSI or Wide variant
+    (a real binary imports CreateProcessW, never CreateProcess), so an exact
+    match alone misses them.
+    """
+    if name in SUSPICIOUS_APIS:
+        return True
+    return len(name) > 1 and name[-1] in "AW" and name[:-1] in SUSPICIOUS_APIS
 
 
 @dataclass
@@ -23,11 +58,11 @@ class PEMetadata:
             return False
         try:
             compile_dt = datetime.fromisoformat(self.compile_time.replace('Z', '+00:00'))
-            now = datetime.now()
-            # Future date or before 1990 (early Windows era)
-            return compile_dt.year > now.year or compile_dt.year < 1990
-        except:
+        except ValueError:
             return False
+        now = datetime.now(timezone.utc)
+        # Future date or before 1990 (early Windows era)
+        return compile_dt.year > now.year or compile_dt.year < 1990
 
 
 @dataclass
@@ -87,6 +122,10 @@ class ImportInfo:
     dll_name: str
     functions: List[str]
 
+    def suspicious_functions(self) -> List[str]:
+        """Imported functions that are commonly used in malware."""
+        return [func for func in self.functions if is_suspicious_api(func)]
+
     def is_suspicious(self) -> bool:
         """
         Detect suspicious API imports.
@@ -94,27 +133,7 @@ class ImportInfo:
         Returns:
             True if any imported function is commonly used in malware
         """
-        suspicious_apis = {
-            # Memory manipulation
-            'VirtualAlloc', 'VirtualAllocEx', 'VirtualProtect', 'VirtualProtectEx',
-            # Process injection
-            'WriteProcessMemory', 'CreateRemoteThread', 'SetWindowsHookEx',
-            # Code loading
-            'LoadLibrary', 'LoadLibraryA', 'LoadLibraryW', 'LoadLibraryEx',
-            'GetProcAddress',
-            # Cryptography (sometimes obfuscation)
-            'CryptEncrypt', 'CryptDecrypt', 'CryptAcquireContext',
-            # Registry manipulation
-            'RegSetValueEx', 'RegCreateKeyEx', 'RegDeleteKey',
-            # Network
-            'InternetOpen', 'InternetConnect', 'URLDownloadToFile',
-            # Process manipulation
-            'CreateProcess', 'ShellExecute', 'WinExec',
-            # Anti-debugging
-            'IsDebuggerPresent', 'CheckRemoteDebuggerPresent',
-        }
-
-        return any(func in suspicious_apis for func in self.functions)
+        return any(is_suspicious_api(func) for func in self.functions)
 
 
 @dataclass
