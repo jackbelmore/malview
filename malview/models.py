@@ -30,6 +30,35 @@ SUSPICIOUS_APIS = frozenset({
 })
 
 
+# Matches that describe a file rather than flag it are shown but not scored:
+# - PECheck: Yara-Rules' file-property rules (IsPE32, IsConsole, ...).
+# - PEiD: entry-point signatures from the PEiD database, which identify
+#   compilers (e.g. Microsoft_Visual_Cpp_8) as often as packers and are
+#   prone to false positives. PEiD rules also tagged Packer still count.
+def _is_informational(tags: set) -> bool:
+    return "pecheck" in tags or ("peid" in tags and "packer" not in tags)
+
+
+def yara_match_kind(match: "YaraMatch") -> str:
+    """Classify a YARA match as "info", "packer", "exploit", "malware" or "other".
+
+    Tags win over the rule's directory: Yara-Rules keeps some generic
+    heuristics under malware/ (e.g. suspicious_packer_section, tagged
+    "packer"), and those shouldn't be reported as a malware family.
+    """
+    tags = {t.lower() for t in match.tags}
+    namespace = match.namespace.lower()
+    if _is_informational(tags):
+        return "info"
+    if "packer" in tags or "packer" in namespace:
+        return "packer"
+    if "exploit" in namespace or "cve" in namespace:
+        return "exploit"
+    if "malware" in namespace or tags & {"malware", "trojan", "ransomware", "apt"}:
+        return "malware"
+    return "other"
+
+
 def is_suspicious_api(name: str) -> bool:
     """True if `name` is in SUSPICIOUS_APIS, allowing an A/W suffix.
 
@@ -324,14 +353,12 @@ class ScanResult:
         score = 0
 
         # PRIORITY 1: YARA matches (HIGHEST confidence - 40-60 points)
+        malware_matches = []
         if self.yara_matches:
-            malware_matches = [m for m in self.yara_matches
-                             if "malware" in m.namespace.lower() or
-                             any(tag in ["malware", "trojan", "ransomware", "apt"] for tag in m.tags)]
-            packer_matches = [m for m in self.yara_matches
-                            if "packer" in m.namespace.lower()]
-            exploit_matches = [m for m in self.yara_matches
-                             if "exploit" in m.namespace.lower() or "cve" in m.namespace.lower()]
+            kinds = [(yara_match_kind(m), m) for m in self.yara_matches]
+            malware_matches = [m for kind, m in kinds if kind == "malware"]
+            packer_matches = [m for kind, m in kinds if kind == "packer"]
+            exploit_matches = [m for kind, m in kinds if kind == "exploit"]
 
             if malware_matches:
                 score += 60  # Direct malware family match = very high confidence
@@ -373,10 +400,10 @@ class ScanResult:
         score = min(score, 100)
 
         # Determine risk level with YARA-aware thresholds
-        if self.yara_matches and any("malware" in m.namespace.lower() for m in self.yara_matches):
+        if malware_matches:
             # If YARA directly identified malware, always HIGH or CRITICAL
             risk_level = "CRITICAL" if score >= 60 else "HIGH"
-            summary = f"YARA identified as malware: {self.yara_matches[0].rule_name}"
+            summary = f"YARA identified as malware: {malware_matches[0].rule_name}"
         elif score < 20:
             risk_level = "LOW"
             summary = "File shows minimal suspicious indicators"
