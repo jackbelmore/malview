@@ -1,0 +1,9 @@
+# Tool configuration only; malview is run from a checkout, not installed.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
