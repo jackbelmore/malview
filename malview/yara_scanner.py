@@ -1,11 +1,28 @@
 """YARA scanner for malware detection."""
 
+import os
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 import yara
+
+# Where scripts/fetch-rules.sh puts the Yara-Rules collection.
+DEFAULT_RULES_DIR = Path(__file__).resolve().parent.parent / "rules" / "yara"
+RULES_ENV_VAR = "MALVIEW_YARA_RULES"
+
+
+def _log(message: str) -> None:
+    # stderr, so that `cli.py --json` keeps stdout as pure JSON.
+    print(message, file=sys.stderr)
+
+
+def default_rules_path() -> Path:
+    """$MALVIEW_YARA_RULES if set, else rules/yara/ in the repo."""
+    env = os.environ.get(RULES_ENV_VAR)
+    return Path(env) if env else DEFAULT_RULES_DIR
 
 
 @dataclass
@@ -26,50 +43,53 @@ class YaraScanner:
         Initialize YARA scanner.
 
         Args:
-            rules_path: Path to YARA rules directory or index file.
-                       If None, uses default yara_rules/ directory.
+            rules_path: Path to a YARA rules directory. If None, uses
+                       $MALVIEW_YARA_RULES, then rules/yara/ in the repo.
         """
-        if rules_path is None:
-            # Default to yara_rules directory
-            rules_path = Path(__file__).parent.parent / "yara_rules"
-
-        self.rules_path = Path(rules_path)
+        self.rules_path = Path(rules_path) if rules_path else default_rules_path()
         self.rules = None
         self._load_rules()
 
+    @staticmethod
+    def _wanted(rel: Path) -> bool:
+        """Skip deprecated rules and the upstream *index.yar include files.
+
+        The index files #include every rule in their directory, so compiling
+        them alongside the individual files reports each match twice.
+        """
+        return "deprecated" not in rel.parts and "index" not in rel.name.lower()
+
     def _load_rules(self):
         """Load YARA rules from the rules directory."""
-        if not self.rules_path.exists():
-            print(f"Warning: YARA rules path not found: {self.rules_path}")
+        if not self.rules_path.is_dir():
+            _log(
+                f"Warning: YARA rules not found at {self.rules_path}. "
+                f"Run scripts/fetch-rules.sh or set {RULES_ENV_VAR}; "
+                "continuing without YARA."
+            )
             return
 
-        # Try to use index.yar if it exists (compiled index)
-        index_file = self.rules_path / "index.yar"
-        if index_file.exists():
-            try:
-                self.rules = yara.compile(filepath=str(index_file))
-                print(f"Loaded YARA rules from {index_file}")
-                return
-            except Exception as e:
-                print(f"Warning: Failed to load index.yar: {e}")
-
-        # Otherwise, compile all .yar and .yara files individually (skip failures)
+        # Compile every .yar/.yara file individually so that one broken or
+        # unsupported rule doesn't take the whole set down.
         try:
             rule_files = {}
             failed_count = 0
 
-            # Collect all rule files
+            # Collect all rule files. Filters look at the path *relative to
+            # the rules directory*, so where the rules live doesn't matter.
             all_rule_files = []
-            for rule_file in self.rules_path.rglob("*.yar"):
-                if "test" not in str(rule_file).lower() and "deprecated" not in str(rule_file).lower():
-                    all_rule_files.append(rule_file)
-            for rule_file in self.rules_path.rglob("*.yara"):
-                if "test" not in str(rule_file).lower() and "deprecated" not in str(rule_file).lower():
-                    all_rule_files.append(rule_file)
+            for pattern in ("*.yar", "*.yara"):
+                for rule_file in self.rules_path.rglob(pattern):
+                    if self._wanted(rule_file.relative_to(self.rules_path)):
+                        all_rule_files.append(rule_file)
 
             # Try to compile each file individually
-            for rule_file in all_rule_files:
-                namespace = rule_file.stem
+            for rule_file in sorted(all_rule_files):
+                # Namespace = path relative to the rules dir, e.g.
+                # "malware/MALW_Atmos". The top-level directory is what the
+                # risk scoring and categorisation key on, and the full path
+                # keeps same-named files in different directories apart.
+                namespace = rule_file.relative_to(self.rules_path).with_suffix("").as_posix()
                 try:
                     # Test compile this single file
                     yara.compile(filepath=str(rule_file))
@@ -81,17 +101,17 @@ class YaraScanner:
                         # These rules require Cuckoo Sandbox integration
                         pass
                     else:
-                        print(f"Skipping {rule_file.name}: {str(e)[:50]}")
+                        _log(f"Skipping {rule_file.name}: {str(e)[:50]}")
 
             if rule_files:
                 # Compile all valid rules together
                 self.rules = yara.compile(filepaths=rule_files)
-                print(f"Loaded {len(rule_files)} YARA rules ({failed_count} skipped)")
+                _log(f"Loaded {len(rule_files)} YARA rule files ({failed_count} skipped)")
             else:
-                print("Warning: No YARA rules could be loaded")
+                _log("Warning: No YARA rules could be loaded")
 
         except Exception as e:
-            print(f"Error loading YARA rules: {e}")
+            _log(f"Error loading YARA rules: {e}")
             self.rules = None
 
     def scan(self, file_path: str) -> List[YaraMatch]:
@@ -126,7 +146,7 @@ class YaraScanner:
             msg = str(e)
             if any(name in msg for name in noisy_rules):
                 return []
-            print(f"Error scanning with YARA: {e}")
+            _log(f"Error scanning with YARA: {e}")
             return []
 
         results = []
@@ -167,7 +187,7 @@ class YaraScanner:
         }
 
         for match in matches:
-            namespace = match.namespace.lower()
+            namespace = match.namespace.lower().split("/")[0]
             rule_name = match.rule_name.lower()
 
             # Categorize based on namespace and rule name

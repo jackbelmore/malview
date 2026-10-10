@@ -4,8 +4,14 @@
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from malview import PEEngine, MalviewError
+
+
+def _category(namespace):
+    """Top-level rules directory of a YARA namespace ("malware/MALW_x" -> "malware")."""
+    return namespace.split("/")[0].lower()
 
 
 def format_simple(result):
@@ -45,7 +51,7 @@ def format_simple(result):
                 "exploit": "💥",
                 "antidebug": "🛡️",
                 "crypto": "🔐"
-            }.get(match.namespace, "⚠️")
+            }.get(_category(match.namespace), "⚠️")
             output.append(f"    {namespace_emoji} [{match.namespace}] {match.rule_name}")
             if match.meta:
                 desc = match.meta.get("description", "")
@@ -247,7 +253,7 @@ def format_verbose(result):
         # Group by namespace
         by_namespace = {}
         for match in result.yara_matches:
-            ns = match.namespace
+            ns = _category(match.namespace)
             if ns not in by_namespace:
                 by_namespace[ns] = []
             by_namespace[ns].append(match)
@@ -269,7 +275,7 @@ def format_verbose(result):
             output.append(f"{namespace_emoji} [{namespace}] - {len(matches)} rule(s)")
             output.append("-" * 40)
             for match in matches:
-                output.append(f"  • {match.rule_name}")
+                output.append(f"  • {match.rule_name}  ({match.namespace})")
                 if match.tags:
                     output.append(f"    Tags: {', '.join(match.tags)}")
                 if match.meta:
@@ -457,6 +463,18 @@ Examples:
     )
 
     parser.add_argument(
+        '--yara-rules',
+        metavar='DIR',
+        help='YARA rules directory (default: $MALVIEW_YARA_RULES, then rules/yara/)'
+    )
+
+    parser.add_argument(
+        '--no-yara',
+        action='store_true',
+        help='Skip YARA scanning'
+    )
+
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Verbose output with full details (default: simple mode with risk assessment)'
@@ -465,7 +483,7 @@ Examples:
     args = parser.parse_args()
 
     # Initialize engine
-    engine = PEEngine()
+    engine = PEEngine(yara_rules_path=args.yara_rules, enable_yara=not args.no_yara)
 
     try:
         # Analyze the file
