@@ -1,8 +1,11 @@
 #!/bin/bash
 # Simple launcher for malware analysis tool
 
-cd "$(dirname "$0")"
-source venv/bin/activate
+cd "$(dirname "$0")" || exit 1
+if [ -f venv/bin/activate ]; then
+    # shellcheck source=/dev/null
+    source venv/bin/activate
+fi
 
 # Function to convert Windows path to WSL path
 convert_path() {
@@ -33,13 +36,12 @@ if [ $# -eq 0 ]; then
     echo "Usage:"
     echo "  ./run analyze <file> [-a|--async]  - Analyze a PE file"
     echo "  ./run tui [dir]                    - Launch interactive TUI"
-    echo "  ./run test                         - Run test with notepad.exe"
+    echo "  ./run test                         - Run the test suite"
     echo ""
     echo "Examples:"
     echo "  ./run analyze /mnt/c/Windows/System32/calc.exe"
     echo "  ./run analyze 'C:\\Windows\\System32\\calc.exe' -a"
     echo "  ./run tui /mnt/c/Windows/System32"
-    echo "  ./run test"
     echo ""
     echo "Note: Both Windows (C:\\...) and WSL (/mnt/c/...) paths are supported!"
     echo "      -a or --async runs capa + floss (slower but more thorough)"
@@ -54,19 +56,19 @@ case "$1" in
             exit 1
         fi
         TARGET="$(convert_path "$2")"
-        ASYNC_FLAG=""
-        if [ "$3" = "--async" ] || [ "$3" = "-a" ]; then
-            ASYNC_FLAG="--async"
+        EXTRA=()
+        if [ "${3:-}" = "--async" ] || [ "${3:-}" = "-a" ]; then
+            EXTRA=(--async)
         fi
-        python cli.py "$TARGET" $ASYNC_FLAG
+        python cli.py "$TARGET" "${EXTRA[@]}"
         ;;
     tui)
-        DIR="${2:-/mnt/c/Windows/System32}"
+        DIR="${2:-.}"
         DIR="$(convert_path "$DIR")"
         python tui.py "$DIR"
         ;;
     test)
-        bash test_pe.sh
+        python -m pytest
         ;;
     *)
         echo "Unknown command: $1"

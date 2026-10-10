@@ -1,6 +1,22 @@
+# Virtual environments
 venv/
 venv-win/
+.venv/
+
+# Python
 __pycache__/
-.pytest_cache/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Third-party rule sets, fetched by scripts/fetch-rules.sh
+rules/
+
+# Samples: never commit them
+samples/
+*.exe
+*.dll
+*.sys
+*.bin
+
 .DS_Store
