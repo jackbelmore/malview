@@ -2,7 +2,9 @@
 
 import asyncio
 import os
-from datetime import datetime
+import stat
+import sys
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import pefile
@@ -16,10 +18,20 @@ from .models import (
     StringFinding,
     YaraMatch,
 )
-from .exceptions import FileNotFoundError, InvalidPEFileError
+from .exceptions import FileNotFoundError, InvalidPEFileError, UnsupportedFileError
 from .utils import calculate_entropy, calculate_hashes
-from .tools import run_capa_async, run_floss_async, ToolNotFoundError, ToolExecutionError
+from .tools import run_capa_async, run_floss_async
 from .yara_scanner import YaraScanner
+
+# Refuse to load anything bigger than this by default. pefile maps the whole
+# file and section entropy reads every section, so a huge input is a cheap way
+# to stall the tool.
+DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024
+
+
+def _warn(message: str) -> None:
+    """Diagnostics go to stderr so --json output on stdout stays parseable."""
+    print(f"Warning: {message}", file=sys.stderr)
 
 
 class PEEngine:
@@ -30,13 +42,49 @@ class PEEngine:
     extracting synchronous data using pefile library.
     """
 
-    def __init__(self):
-        """Initialize PE engine with YARA scanner."""
+    def __init__(
+        self,
+        yara_rules_path: Optional[str] = None,
+        enable_yara: bool = True,
+        max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+    ):
+        """
+        Initialize PE engine.
+
+        Args:
+            yara_rules_path: YARA rules directory (default: $MALVIEW_YARA_RULES,
+                then rules/yara/ in the repo).
+            enable_yara: Set False to skip YARA entirely.
+            max_file_size: Largest file (bytes) that will be analyzed.
+        """
+        self.max_file_size = max_file_size
+        self.yara_scanner = None
+        if enable_yara:
+            try:
+                self.yara_scanner = YaraScanner(yara_rules_path)
+            except Exception as e:
+                _warn(f"YARA scanner initialization failed: {e}")
+
+    def _check_input(self, file_path: str) -> None:
+        """Only read regular files under the size limit.
+
+        A FIFO or character device would block (or never end) when pefile or
+        the hasher opens it, and the TUI lets users click on anything in a
+        directory of untrusted samples.
+        """
         try:
-            self.yara_scanner = YaraScanner()
-        except Exception as e:
-            print(f"Warning: YARA scanner initialization failed: {e}")
-            self.yara_scanner = None
+            st = os.stat(file_path)
+        except OSError as e:
+            if not os.path.lexists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}") from e
+            raise UnsupportedFileError(f"Cannot stat {file_path}: {e}") from e
+
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsupportedFileError(f"Not a regular file: {file_path}")
+        if st.st_size > self.max_file_size:
+            raise UnsupportedFileError(
+                f"File is {st.st_size:,} bytes, over the {self.max_file_size:,}-byte limit"
+            )
 
     def analyze(self, file_path: str) -> ScanResult:
         """
@@ -52,24 +100,28 @@ class PEEngine:
             FileNotFoundError: If file doesn't exist
             InvalidPEFileError: If file is not a valid PE
         """
-        # Validate file exists
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
+        # Validate the path before anything opens it
+        self._check_input(file_path)
 
-        # Load PE file
+        # Load PE file. pefile can raise more than PEFormatError on hostile or
+        # truncated input, so anything that goes wrong while parsing is
+        # reported as an invalid PE rather than a crash.
         try:
             pe = pefile.PE(file_path)
         except pefile.PEFormatError as e:
-            raise InvalidPEFileError(f"Invalid PE file: {e}")
+            raise InvalidPEFileError(f"Invalid PE file: {e}") from e
+        except Exception as e:
+            raise InvalidPEFileError(f"Failed to parse PE file: {e}") from e
 
-        # Extract all fast data
-        hashes = self._extract_hashes(file_path)
-        metadata = self._extract_metadata(pe, file_path)
-        sections = self._extract_sections(pe, file_path)
-        imports = self._extract_imports(pe)
-
-        # Close PE file
-        pe.close()
+        try:
+            hashes = self._extract_hashes(file_path)
+            metadata = self._extract_metadata(pe, file_path)
+            sections = self._extract_sections(pe, file_path)
+            imports = self._extract_imports(pe)
+        except Exception as e:
+            raise InvalidPEFileError(f"Malformed PE structures: {e}") from e
+        finally:
+            pe.close()
 
         # Run YARA scan (fast - pattern matching)
         yara_matches = None
@@ -87,7 +139,7 @@ class PEEngine:
                         for match in scanner_matches
                     ]
             except Exception as e:
-                print(f"Warning: YARA scan failed: {e}")
+                _warn(f"YARA scan failed: {e}")
 
         return ScanResult(
             file_path=file_path,
@@ -199,8 +251,7 @@ class PEEngine:
                         for cap in capa_results
                     ]
                 elif isinstance(capa_results, Exception):
-                    # Log or handle capa failure
-                    print(f"Warning: capa failed: {capa_results}")
+                    _warn(f"capa failed: {capa_results}")
 
                 # Process floss results
                 if isinstance(floss_results, list):
@@ -213,11 +264,10 @@ class PEEngine:
                         for finding in floss_results
                     ]
                 elif isinstance(floss_results, Exception):
-                    # Log or handle floss failure
-                    print(f"Warning: floss failed: {floss_results}")
+                    _warn(f"floss failed: {floss_results}")
 
             except Exception as e:
-                print(f"Warning: async tool execution failed: {e}")
+                _warn(f"async tool execution failed: {e}")
 
             return capabilities_data, strings_data
 
@@ -274,7 +324,8 @@ class PEEngine:
         timestamp = pe.FILE_HEADER.TimeDateStamp
         if timestamp:
             try:
-                compile_time = datetime.fromtimestamp(timestamp).isoformat()
+                # PE timestamps are seconds since the epoch in UTC.
+                compile_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
             except (ValueError, OSError):
                 compile_time = None
 

@@ -14,3 +14,9 @@ class FileNotFoundError(MalviewError):
 class InvalidPEFileError(MalviewError):
     """Raised when the file is not a valid PE file."""
     pass
+
+
+class UnsupportedFileError(MalviewError):
+    """Raised when the path is not something malview will read (e.g. a FIFO,
+    device or directory, or a file over the size limit)."""
+    pass
