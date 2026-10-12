@@ -237,13 +237,9 @@ docs/design/            original planning documents
 
 ## How this was built
 
-<!-- TODO(user): confirm and edit this section. The repo's history doesn't
-record how AI tools were used for the original Dec 2025 – Jan 2026 build, so
-the first bullet needs your account of it. -->
-
-- **Original tool (Dec 2025 – Jan 2026):** TODO: describe how you built it,
-  and which AI tools (if any) helped with which parts. The specs in
-  `docs/design/` are from this period.
+- **Original tool (Dec 2025 – Jan 2026):** the first version: the CLI and
+  TUI, the pefile, YARA, capa and FLOSS integration, VirusTotal lookup and the
+  Sysmon config. The specs in `docs/design/` are from this period.
 - **Preparing it for publication (Oct 2026):** done with Claude Code (Claude
   Opus 5.5). Every commit from that pass carries a `Co-Authored-By: Claude`
   trailer. That pass:
