@@ -188,7 +188,7 @@ class MalwareAnalysisTUI(App):
         Binding("r", "refresh_tree", "Refresh"),
     ]
 
-    TITLE = "Malware Analysis TUI"
+    TITLE = "malview"
     SUB_TITLE = "PE File Static Analysis"
 
     def __init__(self, start_path: str = "."):

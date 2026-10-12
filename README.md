@@ -8,7 +8,10 @@ It was built to speed up the first pass on a suspicious executable: hashes,
 headers, sections, imports, rule matches and decoded strings in one place,
 without running the sample.
 
-<!-- TODO(user): add a screenshot of the TUI, e.g. docs/tui.png -->
+![The malview terminal UI: a file tree on the left; on the right, the overview of a packed sample with its metadata, hashes and two suspicious-indicator warnings](docs/screenshots/tui-overview.png)
+
+<sub>All screenshots use harmless synthetic PE files built by
+[tests/pe_builder.py](tests/pe_builder.py), not real malware.</sub>
 
 ## What it reports
 
@@ -63,6 +66,14 @@ named `UPX1` and injection-style imports.
     ℹ️ [packers/packer_compiler_signatures] IsPE32
     ...
 ```
+
+The terminal UI (`python tui.py samples/`) on a similar synthetic sample, with
+two W+X sections (one of them high-entropy) and injection, persistence and
+download-style imports:
+
+| Sections | Imports |
+|---|---|
+| ![Sections tab: UPX0 and UPX1 are both RWX and flagged; UPX1 has entropy 7.985](docs/screenshots/tui-sections.png) | ![Imports tab: KERNEL32, ADVAPI32 and WININET are flagged for APIs such as WriteProcessMemory, CreateRemoteThread, RegSetValueExA and InternetOpenA; USER32 is not](docs/screenshots/tui-imports.png) |
 
 ## Install
 
