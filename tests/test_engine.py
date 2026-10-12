@@ -41,7 +41,8 @@ def test_sections_and_imports(engine, suspicious_pe):
     assert not by_name[".text"].is_suspicious()
 
     imports = {i.dll_name: i.functions for i in result.imports}
-    assert imports["KERNEL32.dll"] == ["VirtualAlloc", "CreateProcessW", "ExitProcess"]
+    assert imports["KERNEL32.dll"] == [
+        "VirtualAlloc", "WriteProcessMemory", "CreateRemoteThread", "ExitProcess"]
     assert [i.dll_name for i in result.get_suspicious_imports()] == ["KERNEL32.dll"]
 
 

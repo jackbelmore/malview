@@ -13,8 +13,9 @@ from collections import defaultdict
 SUSPICIOUS_APIS = frozenset({
     # Memory manipulation
     'VirtualAlloc', 'VirtualAllocEx', 'VirtualProtect', 'VirtualProtectEx',
-    # Process injection
+    # Process injection and hollowing
     'WriteProcessMemory', 'CreateRemoteThread', 'SetWindowsHookEx',
+    'QueueUserAPC', 'SetThreadContext', 'NtUnmapViewOfSection',
     # Code loading
     'LoadLibrary', 'LoadLibraryEx', 'GetProcAddress',
     # Cryptography (sometimes obfuscation)
@@ -29,6 +30,33 @@ SUSPICIOUS_APIS = frozenset({
     'IsDebuggerPresent', 'CheckRemoteDebuggerPresent',
 })
 
+# The subset that writes into or redirects *another* process. Ordinary
+# programs rarely import these, so they raise an anomaly. The rest of
+# SUSPICIOUS_APIS (VirtualAlloc, LoadLibrary, GetProcAddress, CreateProcess,
+# registry calls, ...) turns up in nearly every installer and in most
+# runtimes' startup code, so on its own it only adds the small "suspicious
+# import" bonus and is listed for the analyst.
+INJECTION_APIS = frozenset({
+    'VirtualAllocEx', 'VirtualProtectEx', 'WriteProcessMemory',
+    'CreateRemoteThread', 'SetWindowsHookEx', 'QueueUserAPC',
+    'SetThreadContext', 'NtUnmapViewOfSection',
+})
+
+# Rules in the packers/ directory that identify a compiler, linker or
+# framework rather than a packer, so they're shown but not scored. Without
+# this, every Delphi program (including every Inno Setup installer) scored
+# +20 as "packed": "Borland" matches the string "Borland" anywhere, and
+# borland_delphi is Delphi's normal startup code. From
+# packer_compiler_signatures.yar, IsSuspicious, SkDUndetectabler (a crypter)
+# and AutoIt (often used to wrap malware) still count.
+COMPILER_ID_RULES = frozenset({
+    'Borland',                                                  # packer.yar
+    'borland_cpp', 'borland_delphi', 'borland_delphi_dll', 'borland_component',
+    'free_pascal', 'PureBasic', 'PureBasicDLL', 'PureBasic4xDLL',
+    'MicrosoftVisualCV80', 'Cygwin', 'MinGW_1', 'FASM', 'PellesC',
+    'QtFrameWork', 'masm32_tasm32', 'IsGoLink',
+})
+
 
 # Matches that describe a file rather than flag it are shown but not scored:
 # - PECheck: Yara-Rules' file-property rules (IsPE32, IsConsole, ...).
@@ -37,6 +65,31 @@ SUSPICIOUS_APIS = frozenset({
 #   prone to false positives. PEiD rules also tagged Packer still count.
 def _is_informational(tags: set) -> bool:
     return "pecheck" in tags or ("peid" in tags and "packer" not in tags)
+
+
+# Rule files under packers/ that are about other file types, not PE packers.
+_NON_PE_RULE_FILES = frozenset({
+    "javascript_exploit_and_obfuscation", "jjencode", "tweetable-polyglot-png",
+})
+
+# Rules that fire on common benign software. Shown, not scored.
+NOISY_RULES = frozenset({
+    # Any 3 of the strings "seed", "prot", "ownin", "feed0", "nown" (each
+    # NUL-terminated): found in big DLLs with string tables, such as
+    # Microsoft's dxcompiler.dll. "Rooter" fires whenever RooterStrings does.
+    'RooterStrings', 'Rooter',
+})
+
+# Some Yara-Rules rules say what they were written for in their "filetype"
+# meta. Rules for memory dumps, scripts or documents are shown but not scored
+# on a PE file: "spyeye" (filetype "memory") fires on any one of a dozen
+# strings, one of which, "data_end", is a symbol in every MinGW-built binary.
+_PE_FILETYPES = frozenset({"exe", "dll", "pe", "pe,dll", "win32 exe", "binary", "unknown"})
+
+
+def _targets_other_filetype(meta: dict) -> bool:
+    filetype = str(meta.get("filetype", "")).strip().lower()
+    return bool(filetype) and filetype not in _PE_FILETYPES
 
 
 def yara_match_kind(match: "YaraMatch") -> str:
@@ -48,8 +101,12 @@ def yara_match_kind(match: "YaraMatch") -> str:
     """
     tags = {t.lower() for t in match.tags}
     namespace = match.namespace.lower()
-    if _is_informational(tags):
+    if _is_informational(tags) or match.rule_name in COMPILER_ID_RULES:
         return "info"
+    if (_targets_other_filetype(match.meta or {})
+            or match.rule_name in NOISY_RULES
+            or namespace.rsplit("/", 1)[-1] in _NON_PE_RULE_FILES):
+        return "other"
     if "packer" in tags or "packer" in namespace:
         return "packer"
     if "exploit" in namespace or "cve" in namespace:
@@ -59,6 +116,12 @@ def yara_match_kind(match: "YaraMatch") -> str:
     return "other"
 
 
+def _in_api_set(name: str, apis: frozenset) -> bool:
+    if name in apis:
+        return True
+    return len(name) > 1 and name[-1] in "AW" and name[:-1] in apis
+
+
 def is_suspicious_api(name: str) -> bool:
     """True if `name` is in SUSPICIOUS_APIS, allowing an A/W suffix.
 
@@ -66,9 +129,12 @@ def is_suspicious_api(name: str) -> bool:
     (a real binary imports CreateProcessW, never CreateProcess), so an exact
     match alone misses them.
     """
-    if name in SUSPICIOUS_APIS:
-        return True
-    return len(name) > 1 and name[-1] in "AW" and name[:-1] in SUSPICIOUS_APIS
+    return _in_api_set(name, SUSPICIOUS_APIS)
+
+
+def is_injection_api(name: str) -> bool:
+    """True if `name` is in INJECTION_APIS, allowing an A/W suffix."""
+    return _in_api_set(name, INJECTION_APIS)
 
 
 @dataclass
@@ -292,11 +358,13 @@ class ScanResult:
                 emoji="📅"
             ))
 
-        # Check for high entropy sections
+        # Check for high entropy sections. Encrypted or compressed *code* is
+        # the packing signal; compressed resources and lookup tables in data
+        # sections are common in ordinary software, so they rank lower.
         for section in self.sections:
             if section.entropy > 7.5:
                 anomalies.append(Anomaly(
-                    severity="high",
+                    severity="high" if "X" in section.characteristics else "medium",
                     category="entropy",
                     description=f"Section '{section.name}' has very high entropy ({section.entropy:.2f}) - possible packing/encryption",
                     emoji="🔒"
@@ -319,19 +387,21 @@ class ScanResult:
                     emoji="🚨"
                 ))
 
-        # Check for suspicious imports
-        for imp in self.get_suspicious_imports():
-            suspicious_funcs = [f for f in imp.functions if any(
-                api in f for api in ['VirtualAlloc', 'CreateRemoteThread', 'WriteProcessMemory',
-                                     'IsDebuggerPresent', 'LoadLibrary', 'GetProcAddress']
-            )]
-            if suspicious_funcs:
-                anomalies.append(Anomaly(
-                    severity="medium",
-                    category="import",
-                    description=f"{imp.dll_name} imports suspicious APIs: {', '.join(suspicious_funcs[:3])}",
-                    emoji="🔧"
-                ))
+        # Process-injection imports: one anomaly per file. A DLL can appear
+        # in the import table more than once (Delphi programs list kernel32
+        # several times), and each entry used to count separately.
+        injection_funcs = list(dict.fromkeys(
+            f for imp in self.imports for f in imp.functions if is_injection_api(f)
+        ))
+        if injection_funcs:
+            shown = ", ".join(injection_funcs[:5])
+            more = f" (+{len(injection_funcs) - 5} more)" if len(injection_funcs) > 5 else ""
+            anomalies.append(Anomaly(
+                severity="medium",
+                category="import",
+                description=f"Imports process-injection APIs: {shown}{more}",
+                emoji="🔧"
+            ))
 
         # Check for anti-debugging capabilities
         if self.capabilities:
@@ -406,16 +476,16 @@ class ScanResult:
             summary = f"YARA identified as malware: {malware_matches[0].rule_name}"
         elif score < 20:
             risk_level = "LOW"
-            summary = "File shows minimal suspicious indicators"
+            summary = "Few or no suspicious indicators"
         elif score < 50:
             risk_level = "MEDIUM"
-            summary = "File shows some suspicious indicators - warrants investigation"
+            summary = "Some suspicious indicators - worth a closer look"
         elif score < 75:
             risk_level = "HIGH"
-            summary = "File shows multiple suspicious indicators - likely malicious"
+            summary = "Several suspicious indicators - prioritise for analysis"
         else:
             risk_level = "CRITICAL"
-            summary = "File shows severe malicious indicators - high confidence malware"
+            summary = "Strong suspicious indicators - treat as hostile until analysed"
 
         return RiskAssessment(
             risk_level=risk_level,

@@ -43,19 +43,19 @@ without running the sample.
 
 ## Example
 
-From a synthetic PE built by the test suite: one high-entropy W+X section
-named `UPX1` and injection-style imports.
+From a synthetic PE built with the test suite's `tests/pe_builder.py`: one
+high-entropy W+X section named `UPX1` and process-injection imports.
 
 ```text
 🚨 RISK ASSESSMENT
 --------------------------------------------------------------------------------
   Overall Risk: CRITICAL (Score: 100/100)
-  File shows severe malicious indicators - high confidence malware
+  Strong suspicious indicators - treat as hostile until analysed
 
   3 Suspicious Indicators Found:
     🔒 Section 'UPX1' has very high entropy (7.98) - possible packing/encryption
     🚨 Section 'UPX1' is both writable and executable (W+X)
-    🔧 KERNEL32.dll imports suspicious APIs: VirtualAlloc, LoadLibraryA, GetProcAddress
+    🔧 Imports process-injection APIs: WriteProcessMemory, CreateRemoteThread
 
 🎯 YARA DETECTIONS
 --------------------------------------------------------------------------------
@@ -82,15 +82,21 @@ Python 3.11+.
 ```bash
 git clone https://github.com/jackbelmore/malview.git
 cd malview
-python3 -m venv venv && . venv/bin/activate     # Windows: py -3 -m venv venv; .\venv\Scripts\activate
-pip install -r requirements.txt
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt          # Windows: venv\Scripts\pip
 
 # YARA and capa rules (pinned commits, into the gitignored rules/ directory)
 scripts/fetch-rules.sh
 
 # Optional, for --async (large; may need a C toolchain if no wheel is available)
-pip install -r requirements-optional.txt
+venv/bin/pip install -r requirements-optional.txt
 ```
+
+Calling `venv/bin/pip` and `venv/bin/python` directly works in any shell. To
+activate the venv instead, use the script for your shell:
+`. venv/bin/activate` (bash, zsh), `source venv/bin/activate.fish` (fish) or
+`venv\Scripts\activate` (Windows). Without an active venv, a bare `pip install`
+goes to your user site-packages and can change versions other tools rely on.
 
 On Windows without bash, fetch the rules by hand at the commits listed in
 `scripts/fetch-rules.sh` into `rules\yara` and `rules\capa`, or point
@@ -102,6 +108,8 @@ On Windows without bash, fetch the rules by hand at the commits listed in
 
 ## Usage
 
+With the venv active (or with `venv/bin/python` in place of `python`):
+
 ```bash
 python cli.py sample.exe                 # summary with risk assessment
 python cli.py sample.exe -v              # full detail: every section, import, rule
@@ -112,6 +120,10 @@ VT_API_KEY=... python cli.py sample.exe --vt
 python tui.py [directory]                # browse and analyse; q quits, r refreshes
 ./run analyze 'C:\path\to\file.exe'      # WSL: Windows paths are converted
 ```
+
+Quote paths that contain spaces or brackets, e.g.
+`python cli.py 'setup_game_(64bit)_(1234).exe'`; fish and other shells treat
+unquoted brackets as syntax.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -136,10 +148,49 @@ The score adds up weighted signals, capped at 100:
 | Each anomaly (high / medium / low) | +30 / +15 / +5 |
 | Any suspicious section; any suspicious import | +10 each |
 
-YARA matches that describe a file rather than flag it (Yara-Rules' `PECheck`
-rules such as `IsPE32`, and PEiD compiler signatures) are shown but not
-scored. Otherwise every ordinary MSVC binary would look suspicious. It's a
-triage aid: a high score means "look here first", not a verdict.
+The anomalies are: W+X sections and very high entropy in executable sections
+(high); very high entropy in a data section, process-injection imports
+(`WriteProcessMemory`, `CreateRemoteThread`, `VirtualAllocEx`,
+`SetThreadContext`, ...) and implausible timestamps (medium). Imports that
+nearly every program has, such as `VirtualAlloc`, `LoadLibrary`,
+`GetProcAddress` and `CreateProcess`, are listed but only add the +10.
+
+Some YARA matches are shown but not scored, because on a PE file they say
+nothing about intent:
+
+- rules that describe the file, such as Yara-Rules' `PECheck` rules (`IsPE32`)
+- compiler signatures: PEiD rules and the Delphi, C++Builder, MinGW, Qt and
+  similar rules under `packers/`
+- rules written for something else: memory dumps (`filetype = "memory"`),
+  scripts and documents, and the JavaScript rules under `packers/`
+- a short list of rules that fire on common benign software (`NOISY_RULES` in
+  [malview/models.py](malview/models.py), each with the reason)
+
+It's a triage aid: a high score means "look here first", not a verdict.
+
+### Checked against real software
+
+Scored before and after the changes above, on 116 Windows binaries: 115 from
+installed games, Steam runtimes and Wine/Proton, and a signed GOG installer
+(Inno Setup). None is known malware. One further file, a 16-bit NE
+executable, was correctly rejected as not a PE.
+
+| | LOW | MEDIUM | HIGH | CRITICAL |
+|---|---|---|---|---|
+| Before | 5 | 54 | 2 | 55 |
+| After | 98 | 15 | 1 | 2 |
+
+Before, most Wine DLLs scored CRITICAL as the "SpyEye" banking trojan. That
+rule was written for memory dumps and fires on the string `data_end`, which
+every MinGW-built binary contains. The installer scored HIGH ("likely
+malicious") because its Delphi compiler signature counted as a packer and the
+same common imports counted twice. The three still at HIGH or above are all
+packed: an anti-tamper-protected DLL, a DRM-wrapped game executable, and a
+third-party DLL that was modified after it was signed (its signature no longer
+verifies). That last one is what the score is for.
+
+This measures false positives only, on the same files the changes were tuned
+on. It says nothing about how much real malware malview catches.
 
 ## Tests
 
@@ -208,6 +259,9 @@ the first bullet needs your account of it. -->
     - the TUI didn't start on current Textual, and could be crashed by
       markup in DLL or section names
   - added input hardening, pinned rule downloads, the test suite and CI
+  - after I tried it on a real installer and got "likely malicious", reworked
+    the scoring against the set of real binaries above (see "Checked against
+    real software")
 
 ## License
 

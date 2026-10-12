@@ -24,7 +24,8 @@ def suspicious_pe(make_pe):
             (".packed", RWX, random.Random(0).randbytes(4096)),
         ],
         imports={
-            "KERNEL32.dll": ["VirtualAlloc", "CreateProcessW", "ExitProcess"],
+            "KERNEL32.dll": ["VirtualAlloc", "WriteProcessMemory", "CreateRemoteThread",
+                             "ExitProcess"],
             "USER32.dll": ["MessageBoxA"],
         },
     )
